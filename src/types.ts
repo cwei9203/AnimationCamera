@@ -2,8 +2,8 @@ import { NativeStackScreenProps } from '@react-navigation/native-stack';
 
 export type RootStackParamList = {
   Camera: undefined;
-  Character: { backgroundImage: string };
-  Result: { backgroundImage: string; characterImage: string };
+  Character: undefined;
+  Result: undefined;
 };
 
 export type CameraScreenProps = NativeStackScreenProps<RootStackParamList, 'Camera'>;
@@ -13,7 +13,7 @@ export type ResultScreenProps = NativeStackScreenProps<RootStackParamList, 'Resu
 export interface Character {
   id: string;
   name: string;
-  source: 'builtin' | 'uploaded';
+  source: 'builtin' | 'uploaded' | 'cutout';
   uri: string;
 }
 

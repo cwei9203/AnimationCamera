@@ -1,22 +1,22 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
   Image,
   Alert,
   ActivityIndicator,
   Dimensions,
   Share,
-  PanResponder,
-  GestureResponderEvent,
-  PanResponderGestureState,
 } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated, { useAnimatedStyle, useSharedValue, runOnJS } from 'react-native-reanimated';
 import { ResultScreenProps } from '../types';
 import { captureRef } from '../utils/captureView';
+import { useSession } from '../session/sessionStore';
+import { Button, Card, Screen, TopBar } from '../ui/components';
+import { theme } from '../ui/theme';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -24,79 +24,105 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DEFAULT_WIDTH = 150;
 const DEFAULT_HEIGHT = 200;
 
-interface Position {
-  x: number;
-  y: number;
-}
-
-export default function ResultScreen({ route, navigation }: ResultScreenProps) {
-  const { backgroundImage, characterImage } = route.params;
+export default function ResultScreen({ navigation }: ResultScreenProps) {
+  const { state, dispatch } = useSession();
+  const backgroundImage = state.backgroundImageUri;
+  const characterImage = state.characterImageUri;
   const [isSaving, setIsSaving] = useState(false);
+  useEffect(() => {
+    if (!backgroundImage) {
+      navigation.replace('Camera');
+      return;
+    }
+    if (!characterImage) {
+      navigation.replace('Character');
+    }
+  }, [backgroundImage, characterImage, navigation]);
+
 
   // 用于截图的 ref
   const compositeViewRef = useRef<View>(null);
 
-  // 角色位置和缩放
-  const [position, setPosition] = useState<Position>({
-    x: SCREEN_WIDTH / 2 - DEFAULT_WIDTH / 2,
-    y: SCREEN_HEIGHT / 2 - DEFAULT_HEIGHT / 2,
-  });
-  const [scale, setScale] = useState(1);
+  // 用 shared values 以获得顺滑手势体验
+  const tx = useSharedValue(state.characterTransform.x || (SCREEN_WIDTH / 2 - DEFAULT_WIDTH / 2));
+  const ty = useSharedValue(state.characterTransform.y || (SCREEN_HEIGHT / 2 - DEFAULT_HEIGHT / 2));
+  const scale = useSharedValue(state.characterTransform.scale || 1);
+  const rotation = useSharedValue(state.characterTransform.rotation || 0);
 
-  // 拖拽时的临时位置
-  const tempPositionRef = useRef<Position>(position);
+  const baseTx = useSharedValue(tx.value);
+  const baseTy = useSharedValue(ty.value);
+  const baseScale = useSharedValue(scale.value);
+  const baseRotation = useSharedValue(rotation.value);
 
-  // 创建 PanResponder 处理拖拽
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-
-      onPanResponderGrant: () => {
-        tempPositionRef.current = { ...position };
+  const persistTransform = useCallback(() => {
+    dispatch({
+      type: 'setCharacterTransform',
+      transform: {
+        x: tx.value,
+        y: ty.value,
+        scale: scale.value,
+        rotation: rotation.value,
       },
-
-      onPanResponderMove: (
-        _: GestureResponderEvent,
-        gestureState: PanResponderGestureState
-      ) => {
-        const newX = tempPositionRef.current.x + gestureState.dx;
-        const newY = tempPositionRef.current.y + gestureState.dy;
-
-        // 边界限制（留出一些余地）
-        const maxX = SCREEN_WIDTH - DEFAULT_WIDTH * scale * 0.5;
-        const maxY = SCREEN_HEIGHT - DEFAULT_HEIGHT * scale * 0.5;
-        const minX = -DEFAULT_WIDTH * scale * 0.5;
-        const minY = -DEFAULT_HEIGHT * scale * 0.5;
-
-        setPosition({
-          x: Math.max(minX, Math.min(maxX, newX)),
-          y: Math.max(minY, Math.min(maxY, newY)),
-        });
-      },
-
-      onPanResponderRelease: () => {
-        tempPositionRef.current = { ...position };
-      },
-    })
-  ).current;
-
-  // 缩放功能
-  const zoomIn = useCallback(() => {
-    setScale(prev => Math.min(prev + 0.2, 3));
-  }, []);
-
-  const zoomOut = useCallback(() => {
-    setScale(prev => Math.max(prev - 0.2, 0.3));
-  }, []);
-
-  const resetPosition = useCallback(() => {
-    setPosition({
-      x: SCREEN_WIDTH / 2 - DEFAULT_WIDTH / 2,
-      y: SCREEN_HEIGHT / 2 - DEFAULT_HEIGHT / 2,
     });
-    setScale(1);
-  }, []);
+  }, [dispatch, rotation, scale, tx, ty]);
+
+  const pan = Gesture.Pan()
+    .onBegin(() => {
+      baseTx.value = tx.value;
+      baseTy.value = ty.value;
+    })
+    .onChange(e => {
+      tx.value = baseTx.value + e.translationX;
+      ty.value = baseTy.value + e.translationY;
+    })
+    .onFinalize(() => {
+      runOnJS(persistTransform)();
+    });
+
+  const pinch = Gesture.Pinch()
+    .onBegin(() => {
+      baseScale.value = scale.value;
+    })
+    .onUpdate(e => {
+      scale.value = Math.max(0.3, Math.min(3, baseScale.value * e.scale));
+    })
+    .onFinalize(() => {
+      runOnJS(persistTransform)();
+    });
+
+  const rotate = Gesture.Rotation()
+    .onBegin(() => {
+      baseRotation.value = rotation.value;
+    })
+    .onUpdate(e => {
+      rotation.value = baseRotation.value + e.rotation;
+    })
+    .onFinalize(() => {
+      runOnJS(persistTransform)();
+    });
+
+  const transformGesture = Gesture.Simultaneous(pan, pinch, rotate);
+
+  const characterStyle = useAnimatedStyle(() => {
+    return {
+      transform: [
+        { translateX: tx.value },
+        { translateY: ty.value },
+        { rotateZ: `${rotation.value}rad` },
+        { scale: scale.value },
+      ],
+    };
+  });
+
+  const resetTransform = useCallback(() => {
+    const x = SCREEN_WIDTH / 2 - DEFAULT_WIDTH / 2;
+    const y = SCREEN_HEIGHT / 2 - DEFAULT_HEIGHT / 2;
+    tx.value = x;
+    ty.value = y;
+    scale.value = 1;
+    rotation.value = 0;
+    dispatch({ type: 'resetCharacterTransform' });
+  }, [dispatch, rotation, scale, tx, ty]);
 
   // 请求相册权限
   const requestPermission = useCallback(async () => {
@@ -162,105 +188,59 @@ export default function ResultScreen({ route, navigation }: ResultScreenProps) {
   }, []);
 
   const retake = useCallback(() => {
+    dispatch({ type: 'resetSession' });
     navigation.navigate('Camera');
-  }, [navigation]);
+  }, [dispatch, navigation]);
 
   return (
-    <GestureHandlerRootView style={styles.container}>
-      {/* 合成预览区域 */}
-      <View style={styles.previewContainer}>
-        <View ref={compositeViewRef} style={styles.compositeView}>
-          {/* 背景图 */}
-          <Image source={{ uri: backgroundImage }} style={styles.backgroundImage} />
+    <GestureHandlerRootView style={styles.root}>
+      <Screen>
+        <TopBar title="合成" left={{ label: '返回', onPress: () => navigation.goBack() }} right={{ label: '重置', onPress: resetTransform }} />
 
-          {/* 可拖拽的角色图 */}
-          <View
-            style={[
-              styles.characterContainer,
-              {
-                left: position.x,
-                top: position.y,
-                width: DEFAULT_WIDTH * scale,
-                height: DEFAULT_HEIGHT * scale,
-              },
-            ]}
-            {...panResponder.panHandlers}
-          >
-            <Image
-              source={{ uri: characterImage }}
-              style={styles.characterImage}
-              resizeMode="contain"
-            />
-            {/* 拖拽指示器 */}
-            <View style={styles.dragIndicator}>
-              <Text style={styles.dragIndicatorText}>👆 拖拽</Text>
-            </View>
+        <View style={styles.previewWrap}>
+          <View ref={compositeViewRef} style={styles.compositeView}>
+            {!!backgroundImage && <Image source={{ uri: backgroundImage }} style={styles.backgroundImage} />}
+
+            <GestureDetector gesture={transformGesture}>
+              <Animated.View style={[styles.characterContainer, characterStyle]}>
+                <Image source={{ uri: characterImage || '' }} style={styles.characterImage} resizeMode="contain" />
+              </Animated.View>
+            </GestureDetector>
+          </View>
+
+          <View style={styles.hint}>
+            <Text style={styles.hintText}>拖拽移动 · 双指缩放 · 旋转</Text>
           </View>
         </View>
 
-        {/* 缩放控制按钮 */}
-        <View style={styles.zoomControls}>
-          <TouchableOpacity style={styles.zoomButton} onPress={zoomIn}>
-            <Text style={styles.zoomButtonText}>➕</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.zoomButton} onPress={zoomOut}>
-            <Text style={styles.zoomButtonText}>➖</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.resetButton} onPress={resetPosition}>
-            <Text style={styles.resetButtonText}>↺ 重置</Text>
-          </TouchableOpacity>
+        <View style={styles.bottom}>
+          <Card>
+            <View style={styles.actionRow}>
+              <Button label="分享" onPress={shareImage} variant="secondary" disabled={isSaving} />
+              <Button label={isSaving ? '保存中…' : '保存到相册'} onPress={saveToAlbum} disabled={isSaving} />
+            </View>
+            <View style={styles.secondaryRow}>
+              <Button label="重新拍摄" onPress={retake} variant="ghost" />
+            </View>
+          </Card>
         </View>
-
-        {/* 提示文字 */}
-        <View style={styles.tipOverlay}>
-          <Text style={styles.tipText}>👆 拖拽移动角色位置</Text>
-          <Text style={styles.tipText}>➕➖ 按钮调整大小</Text>
-          <Text style={styles.scaleText}>当前缩放: {Math.round(scale * 100)}%</Text>
-        </View>
-      </View>
-
-      {/* 操作按钮 */}
-      <View style={styles.actionsContainer}>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.primaryButton]}
-          onPress={shareImage}
-          disabled={isSaving}
-        >
-          <Text style={styles.primaryButtonText}>📤 分享作品</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.actionButton, styles.secondaryButton]}
-          onPress={saveToAlbum}
-          disabled={isSaving}
-        >
-          {isSaving ? (
-            <ActivityIndicator color="#333" />
-          ) : (
-            <Text style={styles.secondaryButtonText}>💾 保存到相册</Text>
-          )}
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.actionButton, styles.secondaryButton]}
-          onPress={retake}
-        >
-          <Text style={styles.secondaryButtonText}>🔄 重新拍摄</Text>
-        </TouchableOpacity>
-      </View>
+      </Screen>
     </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
   },
-  previewContainer: {
+  previewWrap: {
     flex: 1,
-    backgroundColor: '#0f0f1a',
     position: 'relative',
+    marginHorizontal: theme.space.lg,
+    marginTop: theme.space.sm,
+    borderRadius: theme.radius.lg,
+    overflow: 'hidden',
+    backgroundColor: theme.colors.border,
   },
   compositeView: {
     width: '100%',
@@ -274,106 +254,39 @@ const styles = StyleSheet.create({
   },
   characterContainer: {
     position: 'absolute',
+    left: 0,
+    top: 0,
+    width: DEFAULT_WIDTH,
+    height: DEFAULT_HEIGHT,
     backgroundColor: 'transparent',
   },
   characterImage: {
     width: '100%',
     height: '100%',
   },
-  dragIndicator: {
+  hint: {
     position: 'absolute',
-    bottom: -25,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
+    left: theme.space.md,
+    top: theme.space.md,
+    backgroundColor: 'rgba(255,255,255,0.90)',
+    borderRadius: theme.radius.pill,
+    paddingHorizontal: theme.space.md,
+    paddingVertical: theme.space.sm,
   },
-  dragIndicatorText: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 12,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
+  hintText: {
+    color: theme.colors.text,
+    fontSize: theme.textSize.sm,
+    fontWeight: '700',
   },
-  zoomControls: {
-    position: 'absolute',
-    right: 16,
-    top: 100,
-    gap: 8,
+  bottom: {
+    paddingHorizontal: theme.space.lg,
+    paddingVertical: theme.space.lg,
   },
-  zoomButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
+  actionRow: {
+    flexDirection: 'row',
+    gap: theme.space.md,
   },
-  zoomButtonText: {
-    fontSize: 20,
-  },
-  resetButton: {
-    width: 44,
-    height: 60,
-    borderRadius: 22,
-    backgroundColor: 'rgba(102,126,234,0.8)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  resetButtonText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  tipOverlay: {
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    borderRadius: 12,
-    padding: 12,
-  },
-  tipText: {
-    color: '#fff',
-    fontSize: 12,
-    textAlign: 'center',
-    marginVertical: 2,
-  },
-  scaleText: {
-    color: '#667eea',
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 8,
-    fontWeight: '600',
-  },
-  actionsContainer: {
-    padding: 20,
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-  },
-  actionButton: {
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  primaryButton: {
-    backgroundColor: '#667eea',
-  },
-  secondaryButton: {
-    backgroundColor: '#f0f0f0',
-  },
-  primaryButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  secondaryButtonText: {
-    color: '#333',
-    fontSize: 16,
-    fontWeight: '600',
+  secondaryRow: {
+    marginTop: theme.space.sm,
   },
 });

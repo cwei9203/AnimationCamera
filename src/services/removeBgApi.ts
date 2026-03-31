@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { File, Paths } from 'expo-file-system';
 
 // 腾讯云智能识图配置
 const TENCENT_SECRET_ID = process.env.TENCENT_SECRET_ID || '';
@@ -11,6 +11,34 @@ export interface RemoveBgResult {
   success: boolean;
   uri?: string;
   error?: string;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  // RN/Expo 环境通常提供 btoa；如果缺失，这里会抛出，调用方会得到错误提示
+  if (typeof btoa !== 'function') {
+    throw new Error('运行环境不支持 btoa，无法转换抠图结果');
+  }
+
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return btoa(binary);
+}
+
+async function savePngToCache(base64: string): Promise<string> {
+  const cacheDir = Paths.cache;
+  const file = new File(cacheDir, `removebg-${Date.now()}.png`);
+
+  // 覆盖写入，避免文件名冲突时抛错
+  file.create({ intermediates: true, overwrite: true });
+  file.write(base64, { encoding: 'base64' });
+  return file.uri;
 }
 
 /**
@@ -46,9 +74,10 @@ export async function removeBgWithRemoveBg(imageUri: string): Promise<RemoveBgRe
       throw new Error(error);
     }
 
-    // 获取结果图片
-    const resultBlob = await apiResponse.blob();
-    const resultUri = URL.createObjectURL(resultBlob);
+    // 获取结果图片并落盘为本地文件（避免 URL.createObjectURL 在 RN 中不可用）
+    const resultBuffer = await apiResponse.arrayBuffer();
+    const base64 = arrayBufferToBase64(resultBuffer);
+    const resultUri = await savePngToCache(base64);
 
     return { success: true, uri: resultUri };
   } catch (error) {
